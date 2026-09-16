@@ -3,6 +3,7 @@ ESTIMATE of time to complete assignment: 4 hours
       Time     Time
 Date  Started  Spent Work completed
 ----  -------  ----  --------------
-9/15  5:15pm  4:00  studied the 13 discussion questions and reviewed Go concurrency concepts
+9/14  5:15pm  4:00  studied the 13 discussion questions and reviewed Go concurrency concepts
+9/15  2:30pm  4:00  implemented and tested the channel merge logic and cancellation behavior
                ----
-               4:00  TOTAL time spent
+               8:00  TOTAL time spent

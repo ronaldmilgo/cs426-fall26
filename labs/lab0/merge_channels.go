@@ -2,6 +2,7 @@ package lab0
 
 import (
 	"context"
+	"sync"
 )
 
 // MergeChannels should read from the channels `a` and `b`
@@ -20,7 +21,24 @@ import (
 //   - https://go.dev/tour/concurrency/4
 //   - https://go.dev/tour/concurrency/5
 func MergeChannels[T any](a <-chan T, b <-chan T, out chan<- T) {
-	panic("TODO: add your implementation")
+	var wg sync.WaitGroup
+	// one for a and another for b
+	wg.Add(2)
+
+	copy := func(ch <-chan T) {
+		defer wg.Done()
+		// Take everything coming FROM ch and send it TO out 
+		for v := range ch {
+			out <- v
+		}
+	}
+	
+	// we read from both channels conccurrently 
+	go copy(a)
+	go copy(b)
+
+	wg.Wait()
+	close(out)
 }
 
 // MergeChannelsOrCancel provides similar semantics to MergeChannels, but
@@ -42,7 +60,38 @@ func MergeChannels[T any](a <-chan T, b <-chan T, out chan<- T) {
 // It is expected that your implemented is similar to `MergeChannels`. You do
 // not need to refactor to deduplicate your code, but you can if you want to.
 func MergeChannelsOrCancel[T any](ctx context.Context, a <-chan T, b <-chan T, out chan<- T) error {
-	panic("TODO: add your implementation")
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	copy := func(ch <-chan T) {
+		defer wg.Done()
+		for {
+			select {
+			// context canceled? STOP
+			case <-ctx.Done():
+				return
+			// value from ch? Process it
+			case v, ok := <-ch:
+				if !ok {
+					return
+				}
+				out <- v
+			}
+		}
+	}
+
+	go copy(a)
+	go copy(b)
+
+	wg.Wait()
+
+	close(out)
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Fetcher is an interface which mimics fetching from some source
@@ -88,5 +137,23 @@ type Fetcher interface {
 // If you are stuck, consider reading the example for `WaitGroup` here:
 //   - https://pkg.go.dev/sync#example-WaitGroup
 func MergeFetches(a Fetcher, b Fetcher, out chan<- string) {
-	panic("TODO: add your implementation")
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	fetch := func(f Fetcher) {
+		defer wg.Done()
+		for {
+			v, ok := f.Fetch()
+			if !ok {
+				return
+			}
+			out <- v
+		}
+	}
+
+	go fetch(a)
+	go fetch(b)
+
+	wg.Wait()
+	close(out)
 }
