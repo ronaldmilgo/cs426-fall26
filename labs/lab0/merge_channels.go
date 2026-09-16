@@ -27,13 +27,13 @@ func MergeChannels[T any](a <-chan T, b <-chan T, out chan<- T) {
 
 	copy := func(ch <-chan T) {
 		defer wg.Done()
-		// Take everything coming FROM ch and send it TO out 
+		// Take everything coming FROM ch and send it TO out
 		for v := range ch {
 			out <- v
 		}
 	}
-	
-	// we read from both channels conccurrently 
+
+	// we read from both channels conccurrently
 	go copy(a)
 	go copy(b)
 
@@ -75,7 +75,12 @@ func MergeChannelsOrCancel[T any](ctx context.Context, a <-chan T, b <-chan T, o
 				if !ok {
 					return
 				}
-				out <- v
+				// Cancellation must also unblock a worker waiting to send.
+				select {
+				case out <- v:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}

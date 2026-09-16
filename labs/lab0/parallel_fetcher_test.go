@@ -64,9 +64,7 @@ func sliceToMap(slice []string) map[string]bool {
 }
 
 func checkResultSet(t *testing.T, expected []string, actual []string) {
-	expectedMap := sliceToMap(expected)
-	actualMap := sliceToMap(actual)
-	require.Equal(t, len(expectedMap), len(actualMap))
+	require.ElementsMatch(t, expected, actual)
 }
 
 func callFetchNTimes(pf *lab0.ParallelFetcher, n int) []string {
@@ -134,6 +132,180 @@ func TestParallelFetcher(t *testing.T) {
 	})
 }
 
+type exhaustedFetcher struct {
+	calls atomic.Int32
+}
+
+func (f *exhaustedFetcher) Fetch() (string, bool) {
+	f.calls.Add(1)
+	return "", false
+}
+
+// Tests that waiting and later callers do not fetch again after exhaustion.
 func TestParallelFetcherAdditional(t *testing.T) {
-	// TODO: add your additional tests here
+	f := &exhaustedFetcher{}
+	pf := lab0.NewParallelFetcher(f, 1)
+	start := make(chan struct{})
+	results := make(chan bool, 20)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, ok := pf.Fetch()
+			results <- ok
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for ok := range results {
+		require.False(t, ok)
+	}
+	value, ok := pf.Fetch()
+	require.False(t, ok)
+	require.Empty(t, value)
+	require.Equal(t, int32(1), f.calls.Load())
+}
+
+type fetchResult struct {
+	value string
+	ok    bool
+}
+
+// controlledFetcher lets tests decide when each underlying call finishes.
+type controlledFetcher struct {
+	entered chan chan fetchResult
+	stop    chan struct{}
+	calls   atomic.Int32
+}
+
+func (f *controlledFetcher) Fetch() (string, bool) {
+	f.calls.Add(1)
+	reply := make(chan fetchResult, 1)
+	select {
+	case f.entered <- reply:
+	case <-f.stop:
+		return "", false
+	}
+	select {
+	case result := <-reply:
+		return result.value, result.ok
+	case <-f.stop:
+		return "", false
+	}
+}
+
+func newControlledFetcher(t *testing.T) *controlledFetcher {
+	f := &controlledFetcher{entered: make(chan chan fetchResult, 64), stop: make(chan struct{})}
+	t.Cleanup(func() { close(f.stop) })
+	return f
+}
+
+func receiveFetcherTestValue[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fetch progress")
+		var zero T
+		return zero
+	}
+}
+
+func startTestFetch(pf *lab0.ParallelFetcher, results chan<- fetchResult) {
+	go func() {
+		value, ok := pf.Fetch()
+		results <- fetchResult{value, ok}
+	}()
+}
+
+// Tests actual overlap, blocking at capacity, and reuse of a released permit.
+func TestParallelFetcherSaturation(t *testing.T) {
+	for _, limit := range []int{1, 3} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			f := newControlledFetcher(t)
+			pf := lab0.NewParallelFetcher(f, limit)
+			results := make(chan fetchResult, limit+1)
+			replies := make([]chan fetchResult, 0, limit)
+			for i := 0; i < limit; i++ {
+				startTestFetch(pf, results)
+				replies = append(replies, receiveFetcherTestValue(t, f.entered))
+			}
+			startTestFetch(pf, results)
+			select {
+			case <-f.entered:
+				t.Fatal("underlying fetch exceeded the concurrency limit")
+			case <-results:
+				t.Fatal("fetch returned while all underlying calls were blocked")
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			replies[0] <- fetchResult{"first", true}
+			require.Equal(t, fetchResult{"first", true}, receiveFetcherTestValue(t, results))
+			next := receiveFetcherTestValue(t, f.entered)
+			next <- fetchResult{"next", true}
+			for _, reply := range replies[1:] {
+				reply <- fetchResult{"remaining", true}
+			}
+			for i := 0; i < limit; i++ {
+				require.True(t, receiveFetcherTestValue(t, results).ok)
+			}
+			require.Equal(t, int32(limit+1), f.calls.Load())
+		})
+	}
+}
+
+// Tests exhaustion with active calls, queued callers, and subsequent callers.
+func TestParallelFetcherExhaustionWithActiveCalls(t *testing.T) {
+	f := newControlledFetcher(t)
+	pf := lab0.NewParallelFetcher(f, 3)
+	results := make(chan fetchResult, 23)
+	var replies []chan fetchResult
+	for i := 0; i < 3; i++ {
+		startTestFetch(pf, results)
+		replies = append(replies, receiveFetcherTestValue(t, f.entered))
+	}
+	for i := 0; i < 20; i++ {
+		startTestFetch(pf, results)
+	}
+	replies[0] <- fetchResult{}
+	for i := 0; i < 21; i++ {
+		require.Equal(t, fetchResult{}, receiveFetcherTestValue(t, results))
+	}
+	// Existing calls can finish after exhaustion without admitting new calls.
+	for _, reply := range replies[1:] {
+		reply <- fetchResult{}
+	}
+	for i := 0; i < 2; i++ {
+		require.Equal(t, fetchResult{}, receiveFetcherTestValue(t, results))
+	}
+	startTestFetch(pf, results)
+	require.Equal(t, fetchResult{}, receiveFetcherTestValue(t, results))
+	require.Equal(t, int32(3), f.calls.Load())
+}
+
+// Tests exact delivery of duplicates and empty strings with more callers than data.
+func TestParallelFetcherExactResults(t *testing.T) {
+	expected := []string{"", "duplicate", "duplicate", "last"}
+	input := make(chan string, len(expected))
+	for _, value := range expected {
+		input <- value
+	}
+	close(input)
+	pf := lab0.NewParallelFetcher(newChannelFetcher(input), 8)
+	results := make(chan fetchResult, 30)
+	for i := 0; i < 30; i++ {
+		startTestFetch(pf, results)
+	}
+	var actual []string
+	for i := 0; i < 30; i++ {
+		result := receiveFetcherTestValue(t, results)
+		if result.ok {
+			actual = append(actual, result.value)
+		}
+	}
+	require.ElementsMatch(t, expected, actual)
 }

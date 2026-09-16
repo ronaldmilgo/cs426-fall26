@@ -1,9 +1,32 @@
-ESTIMATE of time to complete assignment: 4 hours
+ESTIMATE of time to complete assignment: 21 hours
 
       Time     Time
 Date  Started  Spent Work completed
 ----  -------  ----  --------------
 9/14  5:15pm  4:00  studied the 13 discussion questions and reviewed Go concurrency concepts
 9/15  2:30pm  4:00  implemented and tested the channel merge logic and cancellation behavior
+9/15  8:30pm  5:00  Implemented generic and concurrent FIFO queues, with additional tests.
+9/16  2:30pm  4:00  implemented the semaphore and tested permit counting, waiting, and cancellation races.
+9/16  8:30pm  4:00  did wholesome testing, and tried adding more tests to increase coverage. 
                ----
-               8:00  TOTAL time spent
+              21:00  TOTAL time spent
+
+I discussed my solution with no one. I used the Go documentation for help
+understanding Go syntax and standard library features.
+
+The biggest difficulty I encountered was getting comfortable with Go's
+concurrency model and unfamiliar syntax. In particular, it took some time to
+understand the distinction between send-only and receive-only channels and how
+goroutines communicate through channels. I also initially found the difference
+between a Fetcher and a channel confusing, since both can be involved in
+producing values, but they serve different purposes. Another major conceptual
+challenge was synchronization. Understanding when to use a mutex versus a
+semaphore, and how semaphore permits are acquired and released, required some
+careful thought. The custom Semaphore implementation was especially difficult
+because I had to reason about what the semaphore value represented and why
+Post() either increments the available permits or directly wakes a waiting
+goroutine. I also spent time becoming comfortable with Go-specific features
+such as generics, zero values, context cancellation, atomic values, and the use
+of defer for synchronization cleanup. The Go documentation was particularly
+helpful for resolving syntax questions and understanding these standard library
+features.

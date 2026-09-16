@@ -2,6 +2,7 @@ package lab0_test
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -175,4 +176,76 @@ func TestConcurrentQueue(t *testing.T) {
 	qc := lab0.NewConcurrentQueue[int]()
 	require.NotNil(t, qc)
 	runConcurrentQueueTests(t, qc)
+}
+
+func TestGenericQueueAdditional(t *testing.T) {
+	// Tests that a stored nil pointer is distinct from an empty queue.
+	t.Run("nil pointer is a valid item", func(t *testing.T) {
+		q := lab0.NewQueue[*int]()
+		q.Push(nil)
+		value, ok := q.Pop()
+		require.True(t, ok)
+		require.Nil(t, value)
+		value, ok = q.Pop()
+		require.False(t, ok)
+		require.Nil(t, value)
+	})
+
+	// Tests FIFO order and empty results across repeated drain-and-refill cycles.
+	t.Run("reuse after draining", func(t *testing.T) {
+		q := lab0.NewQueue[int]()
+		for cycle := 0; cycle < 5; cycle++ {
+			q.Push(cycle)
+			q.Push(cycle + 10)
+			for _, expected := range []int{cycle, cycle + 10} {
+				value, ok := q.Pop()
+				require.True(t, ok)
+				require.Equal(t, expected, value)
+			}
+			value, ok := q.Pop()
+			require.False(t, ok)
+			require.Zero(t, value)
+		}
+	})
+}
+
+// Tests that concurrent mixed pushes and pops retrieve every unique item exactly once.
+func TestConcurrentQueueAdditional(t *testing.T) {
+	const workers = 8
+	const itemsPerWorker = 500
+	const total = workers * itemsPerWorker
+	q := lab0.NewConcurrentQueue[int]()
+	start := make(chan struct{})
+	results := make(chan int, total)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < itemsPerWorker; i++ {
+				q.Push(id*itemsPerWorker + i)
+				if value, ok := q.Pop(); ok {
+					results <- value
+				}
+			}
+		}(worker)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := make([]bool, total)
+	count := 0
+	for value := range results {
+		require.GreaterOrEqual(t, value, 0)
+		require.Less(t, value, total)
+		require.False(t, seen[value], "duplicate item: %d", value)
+		seen[value] = true
+		count++
+	}
+	require.Equal(t, total, count, "every pushed item should be popped exactly once")
+	value, ok := q.Pop()
+	require.False(t, ok)
+	require.Zero(t, value)
 }

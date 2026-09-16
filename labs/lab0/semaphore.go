@@ -1,8 +1,9 @@
 package lab0
 
 import (
+	"container/list"
 	"context"
-	"sync/atomic"
+	"sync"
 )
 
 // Semaphore mirrors Go's library package `semaphore.Weighted`
@@ -13,20 +14,13 @@ import (
 //   - when resources are depleted, block waiters and resume them
 //     when resources are available
 type Semaphore struct {
-	v      atomic.Int64
-	signal chan struct{}
-
-	// You may add any other state here. You are also free to remove
-	// or modify any existing members.
-
-	// You may not use semaphore.Weighted in your implementation.
+	mu      sync.Mutex
+	value   int
+	waiters list.List
 }
 
 func NewSemaphore() *Semaphore {
-	return &Semaphore{
-		signal: make(chan struct{}),
-		// You may add any other initialization here
-	}
+	return &Semaphore{}
 }
 
 // Post increments the semaphore value by one. If there are any
@@ -36,6 +30,15 @@ func NewSemaphore() *Semaphore {
 // is that calling Release before any Acquire will panic in semaphore.Weighted,
 // but calling Post() before Wait() should neither block nor panic in our interface.
 func (s *Semaphore) Post() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if waiter := s.waiters.Front(); waiter != nil {
+		s.waiters.Remove(waiter)
+		// Give this permit directly to one waiter without blocking the poster.
+		close(waiter.Value.(chan struct{}))
+		return
+	}
+	s.value++
 }
 
 // Wait decrements the semaphore value by one, if there are resources
@@ -48,5 +51,39 @@ func (s *Semaphore) Post() {
 //
 // Analagous to Acquire(ctx, 1) in semaphore.Weighted.
 func (s *Semaphore) Wait(ctx context.Context) error {
-	return nil
+	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.value > 0 {
+		s.value--
+		s.mu.Unlock()
+		return nil
+	}
+	ready := make(chan struct{})
+	waiter := s.waiters.PushBack(ready)
+	s.mu.Unlock()
+
+	select {
+	case <-ready:
+		if err := ctx.Err(); err != nil {
+			// Return the assigned permit if cancellation won the race.
+			s.Post()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		select {
+		case <-ready:
+			// Post already removed this waiter and assigned it a permit.
+			s.mu.Unlock()
+			s.Post()
+		default:
+			s.waiters.Remove(waiter)
+			s.mu.Unlock()
+		}
+		return ctx.Err()
+	}
 }
